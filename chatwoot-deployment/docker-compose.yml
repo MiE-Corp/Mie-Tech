@@ -1,0 +1,44 @@
+version: "3.3"
+
+services:
+  chatwoot:
+    image: chatwoot/chatwoot:latest
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks:
+      - chatwoot_net
+    restart: always
+
+  postgres:
+    image: postgres:14
+    environment:
+      POSTGRES_DB: chatwoot
+      POSTGRES_USER: chatwoot
+      POSTGRES_PASSWORD: change_me
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - chatwoot_net
+    restart: always
+
+  redis:
+    image: redis:7
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - chatwoot_net
+    restart: always
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  chatwoot_net:
+    driver: bridge
