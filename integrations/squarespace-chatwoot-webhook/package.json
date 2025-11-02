@@ -1,0 +1,22 @@
+{
+  "name": "squarespace-chatwoot-webhook",
+  "version": "1.0.0",
+  "description": "Example Squarespace form webhook relay to Chatwoot",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "squarespace",
+    "chatwoot",
+    "webhook"
+  ],
+  "author": "Mie-Tech",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.18.2",
+    "node-fetch": "^3.3.2"
+  }
+}
