@@ -6,13 +6,14 @@ This repository provides infrastructure files and instructions for deploying an 
 
 - [`chatwoot-deployment/docker-compose.yml`](chatwoot-deployment/docker-compose.yml) &mdash; docker-compose stack for Chatwoot, PostgreSQL, and Redis.
 - [`chatwoot-deployment/.env.example`](chatwoot-deployment/.env.example) &mdash; sample environment variables to copy to `.env` before deploying.
+- [`integrations/squarespace-chatwoot-webhook`](integrations/squarespace-chatwoot-webhook) &mdash; sample Express service that relays Squarespace form submissions into a Chatwoot inbox.
 
 ## Prerequisites
 
 Before deploying Chatwoot for mie.ngo, ensure the following prerequisites are met:
 
 1. **Server** &mdash; Ubuntu 22.04 LTS (or compatible) virtual machine with at least 2 vCPUs, 4 GB RAM, and 40 GB disk.
-2. **Domain names** &mdash; DNS `A` records pointing `mie.ngo` (marketing site) and `chat.mie.ngo` (Chatwoot app) to the server's public IP.
+2. **Domain names** &mdash; DNS `A` records pointing `mie.ngo` (marketing site) and `support.mie.ngo` (Chatwoot app) to the server's public IP.
 3. **Docker tooling** &mdash; Docker Engine and Docker Compose plugin installed.
 4. **Email credentials** &mdash; SMTP account capable of sending transactional email (for password resets and notifications).
 
@@ -51,13 +52,13 @@ Before deploying Chatwoot for mie.ngo, ensure the following prerequisites are me
    The first run will create the database, seed initial data, and start the Chatwoot web application on port `3000`.
 
 5. **Access the admin UI**:
-   - Navigate to `https://chat.mie.ngo` (after configuring SSL) or `http://<server-ip>:3000` during testing.
+   - Navigate to `https://support.mie.ngo` (after configuring SSL) or `http://<server-ip>:3000` during testing.
    - Log in with the `SUPER_ADMIN_EMAIL` and `SUPER_ADMIN_PASSWORD` defined in `.env`.
    - Create additional agents, configure inboxes, and connect channels (website live chat widget, WhatsApp, Facebook, etc.).
 
 ## SSL and Reverse Proxy (Recommended)
 
-To serve Chatwoot securely from `https://chat.mie.ngo`, configure a reverse proxy with HTTPS termination. Example using Nginx and Let's Encrypt:
+To serve Chatwoot securely from `https://support.mie.ngo`, configure a reverse proxy with HTTPS termination. Example using Nginx and Let's Encrypt:
 
 1. Install Nginx and Certbot:
    ```bash
@@ -66,13 +67,13 @@ To serve Chatwoot securely from `https://chat.mie.ngo`, configure a reverse prox
 
 2. Obtain certificates:
    ```bash
-   sudo certbot --nginx -d chat.mie.ngo
+   sudo certbot --nginx -d support.mie.ngo
    ```
 
 3. Configure `/etc/nginx/sites-available/chatwoot.conf`:
    ```nginx
    server {
-       server_name chat.mie.ngo;
+       server_name support.mie.ngo;
 
        location / {
            proxy_pass http://127.0.0.1:3000;
