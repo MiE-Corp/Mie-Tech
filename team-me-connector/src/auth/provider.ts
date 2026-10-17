@@ -143,18 +143,29 @@ export class TeamMeOAuthProvider implements OAuthServerProvider {
   async authorize(client: OAuthClientInformationFull, params: AuthorizationParams, res: Response): Promise<void> {
     this.checkResource(params.resource);
     if (params.state !== undefined && params.state.length > MAX_STATE_LENGTH) throw new InvalidRequestError('state is too long.');
+    // An S256 challenge is always 43 base64url characters.
+    if (!/^[A-Za-z0-9_-]{43}$/.test(params.codeChallenge)) throw new InvalidRequestError('code_challenge must be an S256 challenge.');
     // The one scope is always granted. Others in the request (claude.ai has
     // sent "claudeai") are ignored rather than refused (RFC 6749 section 3.3).
     const scopes = [SCOPE];
     this.prune();
-    // One address can't crowd out everyone else: its oldest waiting sign-in
-    // makes room for its newest.
+    // Floods only push out the flooders' own sign-ins: an address at its limit
+    // gives up its oldest, and when the queue is full the address holding the
+    // most does. A newcomer, such as the owner, always gets in.
     const source = ipKeyGenerator(res.req.ip ?? '', 56);
-    const fromSource = [...this.pending].filter(([, p]) => p.source === source);
-    if (fromSource.length >= MAX_PENDING_PER_SOURCE) this.pending.delete(fromSource[0]![0]);
-    if (this.pending.size >= MAX_PENDING) {
-      sendMessagePage(res, 429, 'Too many sign-ins in progress', 'Wait a few minutes, then connect again from Claude.');
-      return;
+    const bySource = new Map<string, string[]>();
+    for (const [id, p] of this.pending) {
+      const ids = bySource.get(p.source);
+      if (ids) ids.push(id);
+      else bySource.set(p.source, [id]);
+    }
+    const own = bySource.get(source) ?? [];
+    if (own.length >= MAX_PENDING_PER_SOURCE) {
+      this.pending.delete(own[0]!);
+    } else if (this.pending.size >= MAX_PENDING) {
+      let busiest: string[] = [];
+      for (const ids of bySource.values()) if (ids.length > busiest.length) busiest = ids;
+      this.pending.delete(busiest[0]!);
     }
     const requestId = randomToken();
     this.pending.set(requestId, {

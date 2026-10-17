@@ -156,6 +156,8 @@ describe('OAuth sign-in', () => {
     assert.equal(new URL(other.headers.get('location')!).searchParams.get('error'), 'invalid_target');
     const state = await fetch(authorizeUrl(s.base, client.client_id, pkce().challenge, { state: 's'.repeat(2000) }), { redirect: 'manual' });
     assert.equal(new URL(state.headers.get('location')!).searchParams.get('error'), 'invalid_request');
+    const challenge = await fetch(authorizeUrl(s.base, client.client_id, 'A'.repeat(5000)), { redirect: 'manual' });
+    assert.equal(new URL(challenge.headers.get('location')!).searchParams.get('error'), 'invalid_request');
   });
 
   it('ignores scopes it does not know and grants team-me', async () => {
@@ -217,6 +219,11 @@ describe('OAuth sign-in', () => {
       assert.equal((await login(proxied.base, requestIdFrom(await owner.text()), PASSPHRASE)).status, 302);
       // The flooding address only pushed out its own oldest requests.
       assert.equal((await login(proxied.base, first, PASSPHRASE)).status, 400);
+      // Even with the whole queue full from many addresses, a newcomer gets in.
+      for (let i = 0; i < 100; i++) {
+        await Promise.all(Array.from({ length: 10 }, () => from(`198.51.100.${i}`)));
+      }
+      assert.equal((await from('192.0.2.56')).status, 200);
     } finally {
       await proxied.close();
     }

@@ -181,6 +181,31 @@ describe('Store file', () => {
     }
   });
 
+  it('loses no writes when two processes write at the same time', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'team-me-'));
+    try {
+      const file = path.join(dir, 'team-me.json');
+      const [a, b] = [await Store.open(file), await Store.open(file)];
+      const write = (store: Store, n: number) =>
+        Promise.all(Array.from({ length: 25 }, (_, i) => store.createAssignment({ workspaceId: 'beat-on-me', mode: 'build', request: `${n}-${i}`, source: 'owner' })));
+      await Promise.all([write(a, 1), write(b, 2)]);
+      assert.equal((await Store.open(file)).listAssignments({ limit: 100 }).length, 50);
+      assert.deepEqual((await readdir(dir)).filter((f) => f.endsWith('.lock')), []);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("doesn't split an emoji when it shortens text", async () => {
+    const store = await Store.open();
+    const d = await store.addDeliverable({ workspaceId: 'beat-on-me', title: 't', content: `${'x'.repeat(399)}\u{1F3B5} and more`, author: 'claude' });
+    assert.equal(store.listDeliverables()[0]!.preview, `${'x'.repeat(399)}…`);
+    assert.equal(d.content.length, 410);
+    await store.createAssignment({ workspaceId: 'beat-on-me', mode: 'build', request: `${'y'.repeat(139)}\u{1F680} launch`, source: 'owner' });
+    // encodeURIComponent throws on a lone surrogate.
+    for (const item of store.recentWork()) assert.doesNotThrow(() => encodeURIComponent(item.title));
+  });
+
   it('keeps only the newest app registrations that never signed in', async () => {
     const store = await Store.open();
     const client = (id: string) => ({ client_id: id, redirect_uris: ['https://claude.ai/api/mcp/auth_callback'] }) as OAuthClientInformationFull;

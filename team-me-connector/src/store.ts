@@ -7,8 +7,8 @@ import type { OAuthClientInformationFull } from '@modelcontextprotocol/sdk/share
 // deliverables and the approval queue, plus the connector's OAuth records.
 // Everything lives in one JSON file, with the text of each deliverable in its
 // own file in a `deliverables` folder next to it. Run a single replica. During
-// a deploy the old and new revision overlap briefly; every write re-reads the
-// file first if the other one changed it, so neither undoes the other's work.
+// a deploy the old and new revision overlap briefly; every write holds a lock
+// file and re-reads the data first, so neither undoes the other's work.
 
 export const MODES = ['research', 'build', 'action'] as const;
 export type Mode = (typeof MODES)[number];
@@ -120,6 +120,9 @@ export const MAX_UNUSED_CLIENTS = 100;
 
 const PREVIEW_LENGTH = 400;
 
+// A lock left behind by a process that died mid-write is taken over after this.
+const LOCK_STALE_MS = 30_000;
+
 export function refreshTokenUsable(record: RefreshTokenRecord, nowSeconds: number): boolean {
   return record.expiresAt >= nowSeconds && (record.rotatedAt === undefined || nowSeconds - record.rotatedAt <= REFRESH_REUSE_GRACE_SECONDS);
 }
@@ -162,8 +165,13 @@ function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
+// Shortens text without splitting an emoji or other character outside the BMP.
+function cut(text: string, max: number): string {
+  return text.length <= max ? text : text.slice(0, max).replace(/[\uD800-\uDBFF]$/, '');
+}
+
 function preview(content: string): string {
-  return content.length <= PREVIEW_LENGTH ? content : `${content.slice(0, PREVIEW_LENGTH)}…`;
+  return content.length <= PREVIEW_LENGTH ? content : `${cut(content, PREVIEW_LENGTH)}…`;
 }
 
 function withText(summary: DeliverableSummary, text: DeliverableText): Deliverable {
@@ -279,19 +287,47 @@ export class Store {
     await this.enqueue(() => this.reloadIfChanged());
   }
 
+  // Holds `<file>.lock` while `task` runs, so two processes never interleave a
+  // read-modify-write. Creating the lock with O_EXCL is atomic on SMB too.
+  private async withFileLock<T>(task: () => Promise<T>): Promise<T> {
+    if (!this.file) return task();
+    const lock = `${this.file}.lock`;
+    for (;;) {
+      try {
+        await (await fs.open(lock, 'wx', 0o600)).close();
+        break;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+        const stats = await fs.stat(lock).catch(() => undefined);
+        if (stats && Date.now() - stats.mtimeMs > LOCK_STALE_MS) await fs.rm(lock, { force: true });
+        else await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    }
+    try {
+      return await task();
+    } finally {
+      await fs.rm(lock, { force: true });
+    }
+  }
+
   // Runs `fn` against the latest data and saves the result. Writes are
-  // serialized so two requests never interleave a read-modify-write, and the
-  // change only becomes visible once it is saved. If `fn` throws, nothing
-  // changes.
+  // serialized, within this process and across processes, so two requests never
+  // interleave a read-modify-write, and the change only becomes visible once it
+  // is saved. If `fn` throws, nothing changes.
   private mutate<T>(fn: (data: Data) => T): Promise<T> {
-    return this.enqueue(async () => {
-      await this.reloadIfChanged();
-      const draft = clone(this.data);
-      const result = fn(draft);
-      await this.persist(draft);
-      this.data = draft;
-      return clone(result);
-    });
+    return this.enqueue(() =>
+      this.withFileLock(async () => {
+        // Re-read even if the stamp looks unchanged: on Azure Files stat() can
+        // answer from a cache up to a second old. The file is small.
+        this.stamp = undefined;
+        await this.reloadIfChanged();
+        const draft = clone(this.data);
+        const result = fn(draft);
+        await this.persist(draft);
+        this.data = draft;
+        return clone(result);
+      }),
+    );
   }
 
   // ---- Workspaces ----
@@ -559,7 +595,7 @@ export class Store {
         at: a.updatedAt,
         workspaceId: a.workspaceId,
         id: a.id,
-        title: a.request.slice(0, 140),
+        title: cut(a.request, 140),
         status: a.status,
       })),
       ...this.data.deliverables.map((d) => ({ kind: 'deliverable' as const, at: d.createdAt, workspaceId: d.workspaceId, id: d.id, title: d.title })),

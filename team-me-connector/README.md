@@ -43,7 +43,7 @@ claude mcp add --transport http team-me https://mcp.mie.ngo/mcp
 The service is its own OAuth 2.1 authorization server, built on the MCP TypeScript SDK's auth router:
 
 - Claude registers itself through dynamic client registration. Only Claude's callbacks (`https://claude.ai/api/mcp/auth_callback`, `https://claude.com/api/mcp/auth_callback`) and local loopback callbacks (Claude Code) are accepted. Registrations are kept small, and only the newest 100 that never finished signing in are kept.
-- The sign-in page asks for the owner passphrase. Five wrong tries end that sign-in, and the page is rate limited. One network address can only hold a few sign-ins open at a time, so nobody can fill the queue and lock the owner out.
+- The sign-in page asks for the owner passphrase. Five wrong tries end that sign-in, and the page is rate limited. One network address can only hold a few sign-ins open at a time, and when too many are waiting the busiest address gives up its oldest, so a flood only pushes out its own requests.
 - Access tokens last an hour and are signed with `TOKEN_SIGNING_SECRET`. Refresh tokens last 30 days, are stored only as hashes keyed by that secret, and change on every use. A used refresh token still works for a minute, so two requests that refresh at the same time don't sign Claude out.
 - Every token is for `https://mcp.mie.ngo/mcp` (RFC 8707) and the `team-me` scope. Other scopes in a request are ignored.
 
@@ -69,10 +69,10 @@ az containerapp revision restart -g TeamMe-WestUS -n team-me-connector \
 | `ALLOW_LOOPBACK_REDIRECTS` | no | Accept `http://localhost` callbacks for Claude Code (default `true`) |
 | `ACCESS_TOKEN_TTL_SECONDS` | no | Default `3600` |
 | `REFRESH_TOKEN_TTL_DAYS` | no | Default `30` |
-| `TRUST_PROXY` | no | Proxy hops in front of the app (default `1` for Azure Container Apps; `2` behind Cloudflare's proxy as well) |
+| `TRUST_PROXY` | no | Proxy hops in front of the app. Keep the default `1` with `mcp` set to DNS only in Cloudflare. Use `2` only with Cloudflare's proxy on **and** the app limited to Cloudflare's addresses (see step 6) |
 | `PORT` | no | Default `8080` |
 
-All state is in the data file and the `deliverables` folder next to it, so run exactly one replica. During a deploy the old and new revision run side by side for a short while; each write re-reads the file first if the other one changed it, so neither undoes the other's work.
+All state is in the data file and the `deliverables` folder next to it, so run exactly one replica. During a deploy the old and new revision run side by side for a short while; each write holds a lock file and re-reads the data first, so neither undoes the other's work.
 
 ## Deploy on Azure Container Apps
 
@@ -82,12 +82,12 @@ The Mie-Tech repo already deploys Chatwoot to Azure Container Apps (resource gro
 
    ```sh
    cd team-me-connector && npm ci && npm run build
-   npm run hash-passphrase            # OWNER_PASSPHRASE_HASH
-   openssl rand -base64 48            # TOKEN_SIGNING_SECRET
-   openssl rand -hex 32               # COMMAND_CENTER_API_KEY
+   npm run hash-passphrase
+   openssl rand -base64 48
+   openssl rand -hex 32
    ```
 
-   Run the next steps from the same `team-me-connector` folder.
+   The last three lines print `OWNER_PASSPHRASE_HASH`, `TOKEN_SIGNING_SECRET` and `COMMAND_CENTER_API_KEY`, in that order. Run the next steps from the same `team-me-connector` folder.
 
 2. Build the image in the registry:
 
@@ -95,10 +95,9 @@ The Mie-Tech repo already deploys Chatwoot to Azure Container Apps (resource gro
    az acr build --registry azcrfinal27341 --image team-me-connector:0.1.0 .
    ```
 
-3. Create a file share for the data file and attach it to the environment:
+3. Create a file share for the data file and attach it to the environment. Replace `<account>` with a new lowercase storage account name, e.g. `teammedata2026`:
 
    ```sh
-   # <account> is a new lowercase name, e.g. teammedata2026
    az storage account create -g TeamMe-WestUS -n <account> --sku Standard_LRS
    az storage share-rm create -g TeamMe-WestUS --storage-account <account> -n team-me
    az containerapp env storage set -g TeamMe-WestUS -n <environment> --storage-name team-me \
@@ -143,6 +142,18 @@ The Mie-Tech repo already deploys Chatwoot to Azure Container Apps (resource gro
      --environment <environment> --validation-method CNAME
    ```
 
+   Keep `mcp` set to DNS only. If you later turn on Cloudflare's proxy for it, first limit the app to Cloudflare's addresses, then set `TRUST_PROXY=2`. Without the limit, anyone who calls the app's own `azurecontainerapps.io` address can choose the address that every rate limit sees.
+
+   ```sh
+   i=0
+   for range in $(curl -s https://www.cloudflare.com/ips-v4); do
+     i=$((i+1))
+     az containerapp ingress access-restriction set -g TeamMe-WestUS -n team-me-connector \
+       --rule-name "cloudflare-$i" --ip-address "$range" --action Allow
+   done
+   az containerapp update -g TeamMe-WestUS -n team-me-connector --set-env-vars TRUST_PROXY=2
+   ```
+
 7. Check `https://mcp.mie.ngo/healthz` answers `{"ok":true,...}`, then add the connector in Claude.
 
 To ship a new version, run step 2 with a new tag and `az containerapp update -g TeamMe-WestUS -n team-me-connector --image azcrfinal27341.azurecr.io/team-me-connector:<tag>`. The Chatwoot workflows ignore changes in this folder.
@@ -151,8 +162,10 @@ To ship a new version, run step 2 with a new tag and `az containerapp update -g 
 
 ```sh
 npm ci
-npm test          # type-checks, then runs the OAuth, MCP and API tests
+npm test
 npm run build && PUBLIC_BASE_URL=http://localhost:8080 OWNER_PASSPHRASE_HASH=... TOKEN_SIGNING_SECRET=... npm start
 ```
+
+`npm test` type-checks, then runs the OAuth, MCP and API tests.
 
 [COMMAND-CENTER-HANDOFF.md](COMMAND-CENTER-HANDOFF.md) describes the REST API for whoever updates the Command Center.
