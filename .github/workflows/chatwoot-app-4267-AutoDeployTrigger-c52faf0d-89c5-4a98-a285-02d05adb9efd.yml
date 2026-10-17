@@ -9,6 +9,8 @@ on:
     paths:
     - '**'
     - '.github/workflows/chatwoot-app-4267-AutoDeployTrigger-c52faf0d-89c5-4a98-a285-02d05adb9efd.yml'
+    # The Team Me connector deploys on its own; its changes don't redeploy Chatwoot.
+    - '!team-me-connector/**'
 
   # Allow manual trigger 
   workflow_dispatch:      
