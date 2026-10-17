@@ -14,6 +14,7 @@ let cachedHash: string | undefined;
 
 export interface Running {
   base: string;
+  env: Record<string, string>;
   config: Config;
   store: Store;
   close: () => Promise<void>;
@@ -26,19 +27,27 @@ export async function start(env: Record<string, string> = {}): Promise<Running> 
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address() as AddressInfo;
   const base = `http://127.0.0.1:${port}`;
-  const config = loadConfig({
+  const fullEnv = {
     PUBLIC_BASE_URL: base,
     OWNER_PASSPHRASE_HASH: cachedHash,
     TOKEN_SIGNING_SECRET: 'test-signing-secret-that-is-long-enough-1234567890',
     COMMAND_CENTER_API_KEY: API_KEY,
     TRUST_PROXY: '0',
     ...env,
-  });
+  };
+  let config: Config;
+  try {
+    config = loadConfig(fullEnv);
+  } catch (err) {
+    server.close();
+    throw err;
+  }
   const store = await Store.open();
   const { app } = createApp(config, store);
   server.on('request', app);
   return {
     base,
+    env: fullEnv,
     config,
     store,
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),

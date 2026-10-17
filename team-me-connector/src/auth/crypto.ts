@@ -8,6 +8,13 @@ export function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
+// Storage key for a refresh token. Keyed by the signing secret, so changing
+// TOKEN_SIGNING_SECRET retires every refresh token as well as every access
+// token.
+export function tokenKey(secret: string, token: string): string {
+  return createHmac('sha256', secret).update(`refresh:${token}`).digest('hex');
+}
+
 // Compares two secrets without leaking where they differ or how long they are.
 export function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(createHash('sha256').update(a).digest(), createHash('sha256').update(b).digest());

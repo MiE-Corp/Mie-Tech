@@ -75,6 +75,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const commandCenterApiKey = env.COMMAND_CENTER_API_KEY || undefined;
   if (commandCenterApiKey !== undefined && commandCenterApiKey.length < 32) {
     problems.push('COMMAND_CENTER_API_KEY must be at least 32 characters when set.');
+  } else if (commandCenterApiKey !== undefined && /\s/.test(commandCenterApiKey)) {
+    problems.push('COMMAND_CENTER_API_KEY must not contain spaces (try `openssl rand -hex 32`).');
   }
 
   const allowedRedirectUris = list(env.ALLOWED_REDIRECT_URIS, DEFAULT_REDIRECT_URIS);

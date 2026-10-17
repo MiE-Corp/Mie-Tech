@@ -33,22 +33,26 @@ const schemas = {
   }),
   updateAssignment: z.object({ status: z.enum(ASSIGNMENT_STATUSES).optional(), note: z.string().max(4000).optional() }),
   listDeliverables: z.object({ workspace_id: id.optional(), assignment_id: id.optional(), limit }),
-  createDeliverable: z.object({
-    assignment_id: id.optional(),
-    workspace_id: id.optional(),
-    title: z.string().min(1).max(200),
-    content: z.string().min(1).max(200000),
-    draft: z.string().max(200000).optional(),
-    review: z.string().max(50000).optional(),
-    complete_assignment: z.boolean().optional(),
-  }),
+  createDeliverable: z
+    .object({
+      assignment_id: id.optional(),
+      workspace_id: id.optional(),
+      title: z.string().min(1).max(200),
+      content: z.string().min(1).max(200000),
+      draft: z.string().max(200000).optional(),
+      review: z.string().max(50000).optional(),
+      complete_assignment: z.boolean().optional(),
+    })
+    .refine((b) => b.assignment_id || b.workspace_id, { message: 'Give assignment_id or workspace_id.' }),
   listApprovals: z.object({ workspace_id: id.optional(), status: z.enum(APPROVAL_STATUSES).optional(), limit }),
-  createApproval: z.object({
-    assignment_id: id.optional(),
-    workspace_id: id.optional(),
-    title: z.string().min(1).max(200),
-    details: z.string().min(1).max(20000),
-  }),
+  createApproval: z
+    .object({
+      assignment_id: id.optional(),
+      workspace_id: id.optional(),
+      title: z.string().min(1).max(200),
+      details: z.string().min(1).max(20000),
+    })
+    .refine((b) => b.assignment_id || b.workspace_id, { message: 'Give assignment_id or workspace_id.' }),
   decision: z.object({ decision: z.enum(['approved', 'declined']), note: z.string().max(4000).optional() }),
   recent: z.object({ limit }),
 };
@@ -104,14 +108,18 @@ export function apiRouter(store: Store, config: Config): express.Router {
       res.status(503).json({ error: 'api_disabled', message: 'Set COMMAND_CENTER_API_KEY to turn on the Command Center API.' });
       return;
     }
-    const header = req.headers.authorization ?? '';
-    const [scheme, key] = header.split(' ');
-    if (scheme?.toLowerCase() !== 'bearer' || !key || !safeEqual(key, config.commandCenterApiKey)) {
+    const key = /^Bearer +(\S+) *$/i.exec(req.headers.authorization ?? '')?.[1];
+    if (!key || !safeEqual(key, config.commandCenterApiKey)) {
       res.setHeader('WWW-Authenticate', 'Bearer realm="team-me-api"');
       res.status(401).json({ error: 'unauthorized', message: 'Send the Command Center API key as a Bearer token.' });
       return;
     }
     next();
+  });
+
+  // Pick up anything another revision wrote before answering.
+  router.use((_req, _res, next) => {
+    store.sync().then(() => next(), next);
   });
 
   router.use(express.json({ limit: '1mb' }));
@@ -195,8 +203,8 @@ export function apiRouter(store: Store, config: Config): express.Router {
 
   router.get(
     '/deliverables/:id',
-    handle((req) => {
-      const found = store.getDeliverable(parse(id, req.params.id));
+    handle(async (req) => {
+      const found = await store.getDeliverable(parse(id, req.params.id));
       if (!found) throw new NotFoundError('No such deliverable.');
       return found;
     }),
@@ -247,6 +255,9 @@ export function apiRouter(store: Store, config: Config): express.Router {
     if (err instanceof SyntaxError) return res.status(400).json({ error: 'invalid_json', message: 'The body is not valid JSON.' });
     const status = (err as { status?: number }).status;
     if (status === 413) return res.status(413).json({ error: 'too_large', message: 'The body is over 1 MB.' });
+    if (typeof status === 'number' && status >= 400 && status < 500) {
+      return res.status(status).json({ error: 'invalid_request', message: (err as Error).message });
+    }
     console.error('API error', err);
     return res.status(500).json({ error: 'server_error', message: 'Something went wrong.' });
   });

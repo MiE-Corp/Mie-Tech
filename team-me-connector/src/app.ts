@@ -92,6 +92,7 @@ export function createApp(config: Config, store: Store): App {
       void server.close();
     });
     try {
+      await store.sync();
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
     } catch (err) {

@@ -42,12 +42,18 @@ claude mcp add --transport http team-me https://mcp.mie.ngo/mcp
 
 The service is its own OAuth 2.1 authorization server, built on the MCP TypeScript SDK's auth router:
 
-- Claude registers itself through dynamic client registration. Only Claude's callbacks (`https://claude.ai/api/mcp/auth_callback`, `https://claude.com/api/mcp/auth_callback`) and local loopback callbacks (Claude Code) are accepted.
-- The sign-in page asks for the owner passphrase. Five wrong tries end that sign-in, and the page is rate limited.
-- Access tokens last an hour and are signed with `TOKEN_SIGNING_SECRET`. Refresh tokens last 30 days, are stored only as hashes, and change on every use.
-- Tokens are bound to `https://mcp.mie.ngo/mcp` (RFC 8707) and the `team-me` scope.
+- Claude registers itself through dynamic client registration. Only Claude's callbacks (`https://claude.ai/api/mcp/auth_callback`, `https://claude.com/api/mcp/auth_callback`) and local loopback callbacks (Claude Code) are accepted. Registrations are kept small, and only the newest 100 that never finished signing in are kept.
+- The sign-in page asks for the owner passphrase. Five wrong tries end that sign-in, and the page is rate limited. One network address can only hold a few sign-ins open at a time, so nobody can fill the queue and lock the owner out.
+- Access tokens last an hour and are signed with `TOKEN_SIGNING_SECRET`. Refresh tokens last 30 days, are stored only as hashes keyed by that secret, and change on every use. A used refresh token still works for a minute, so two requests that refresh at the same time don't sign Claude out.
+- Every token is for `https://mcp.mie.ngo/mcp` (RFC 8707) and the `team-me` scope. Other scopes in a request are ignored.
 
-To sign every app out at once, change `TOKEN_SIGNING_SECRET` and delete the `refreshTokens` entries in the data file.
+To sign every app out at once, set a new signing secret and restart the app. Old access and refresh tokens stop working, and each app asks for the passphrase again:
+
+```sh
+az containerapp secret set -g TeamMe-WestUS -n team-me-connector --secrets signing-secret="$(openssl rand -base64 48)"
+az containerapp revision restart -g TeamMe-WestUS -n team-me-connector \
+  --revision "$(az containerapp revision list -g TeamMe-WestUS -n team-me-connector --query '[?properties.active].name | [0]' -o tsv)"
+```
 
 ## Configuration
 
@@ -58,7 +64,7 @@ To sign every app out at once, change `TOKEN_SIGNING_SECRET` and delete the `ref
 | `TOKEN_SIGNING_SECRET` | yes | At least 32 random characters, e.g. `openssl rand -base64 48` |
 | `COMMAND_CENTER_API_KEY` | for `/api` | At least 32 random characters, e.g. `openssl rand -hex 32`. Unset turns `/api` off |
 | `COMMAND_CENTER_ORIGINS` | no | Browser origins allowed to call `/api` (default `https://ai.mie.ngo`) |
-| `DATA_FILE` | yes in production | JSON data file, e.g. `/data/team-me.json`. Unset keeps everything in memory |
+| `DATA_FILE` | yes in production | JSON data file, e.g. `/data/team-me.json`. The text of each deliverable goes in a `deliverables` folder next to it. Unset keeps everything in memory |
 | `ALLOWED_REDIRECT_URIS` | no | Comma-separated OAuth callbacks (default: Claude's two) |
 | `ALLOW_LOOPBACK_REDIRECTS` | no | Accept `http://localhost` callbacks for Claude Code (default `true`) |
 | `ACCESS_TOKEN_TTL_SECONDS` | no | Default `3600` |
@@ -66,7 +72,7 @@ To sign every app out at once, change `TOKEN_SIGNING_SECRET` and delete the `ref
 | `TRUST_PROXY` | no | Proxy hops in front of the app (default `1` for Azure Container Apps; `2` behind Cloudflare's proxy as well) |
 | `PORT` | no | Default `8080` |
 
-All state is one JSON file, so run exactly one replica.
+All state is in the data file and the `deliverables` folder next to it, so run exactly one replica. During a deploy the old and new revision run side by side for a short while; each write re-reads the file first if the other one changed it, so neither undoes the other's work.
 
 ## Deploy on Azure Container Apps
 
@@ -81,10 +87,12 @@ The Mie-Tech repo already deploys Chatwoot to Azure Container Apps (resource gro
    openssl rand -hex 32               # COMMAND_CENTER_API_KEY
    ```
 
+   Run the next steps from the same `team-me-connector` folder.
+
 2. Build the image in the registry:
 
    ```sh
-   az acr build --registry azcrfinal27341 --image team-me-connector:0.1.0 team-me-connector
+   az acr build --registry azcrfinal27341 --image team-me-connector:0.1.0 .
    ```
 
 3. Create a file share for the data file and attach it to the environment:
@@ -95,7 +103,7 @@ The Mie-Tech repo already deploys Chatwoot to Azure Container Apps (resource gro
    az storage share-rm create -g TeamMe-WestUS --storage-account <account> -n team-me
    az containerapp env storage set -g TeamMe-WestUS -n <environment> --storage-name team-me \
      --azure-file-account-name <account> \
-     --azure-file-account-key "$(az storage account keys list -g TeamMe-WestUS -n <account> --query [0].value -o tsv)" \
+     --azure-file-account-key "$(az storage account keys list -g TeamMe-WestUS -n <account> --query '[0].value' -o tsv)" \
      --azure-file-share-name team-me --access-mode ReadWrite
    ```
 
@@ -144,7 +152,7 @@ To ship a new version, run step 2 with a new tag and `az containerapp update -g 
 ```sh
 npm ci
 npm test          # type-checks, then runs the OAuth, MCP and API tests
-PUBLIC_BASE_URL=http://localhost:8080 OWNER_PASSPHRASE_HASH=... TOKEN_SIGNING_SECRET=... npm run build && npm start
+npm run build && PUBLIC_BASE_URL=http://localhost:8080 OWNER_PASSPHRASE_HASH=... TOKEN_SIGNING_SECRET=... npm start
 ```
 
 [COMMAND-CENTER-HANDOFF.md](COMMAND-CENTER-HANDOFF.md) describes the REST API for whoever updates the Command Center.

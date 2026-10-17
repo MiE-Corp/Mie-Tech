@@ -1,4 +1,5 @@
 import type { Request, Response } from 'express';
+import { ipKeyGenerator } from 'express-rate-limit';
 import type { AuthorizationParams, OAuthServerProvider } from '@modelcontextprotocol/sdk/server/auth/provider.js';
 import type { OAuthRegisteredClientsStore } from '@modelcontextprotocol/sdk/server/auth/clients.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
@@ -11,14 +12,14 @@ import {
   AccessDeniedError,
   InvalidClientMetadataError,
   InvalidGrantError,
-  InvalidScopeError,
+  InvalidRequestError,
   InvalidTargetError,
   InvalidTokenError,
 } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { Config } from '../config.js';
 import { isLoopbackHost } from '../config.js';
-import { ConflictError, type Store } from '../store.js';
-import { randomToken, sha256, signAccessToken, verifyAccessTokenSignature, verifyPassphrase } from './crypto.js';
+import { ConflictError, refreshTokenUsable, type Store } from '../store.js';
+import { randomToken, signAccessToken, tokenKey, verifyAccessTokenSignature, verifyPassphrase } from './crypto.js';
 import { sendLoginPage, sendMessagePage } from './loginPage.js';
 
 export const SCOPE = 'team-me';
@@ -26,9 +27,16 @@ export const SCOPE = 'team-me';
 const PENDING_TTL_MS = 10 * 60 * 1000;
 const CODE_TTL_MS = 5 * 60 * 1000;
 const MAX_PASSPHRASE_ATTEMPTS = 5;
-const MAX_PENDING = 100;
+// Sign-ins waiting for the passphrase, in total and per network address.
+const MAX_PENDING = 1000;
+const MAX_PENDING_PER_SOURCE = 10;
+const MAX_STATE_LENGTH = 1024;
+// Registration is open, so keep what an app can store small.
+const MAX_REDIRECT_URIS = 5;
+const MAX_CLIENT_METADATA_LENGTH = 8192;
 
 interface PendingAuthorization {
+  source: string;
   clientId: string;
   clientName: string;
   redirectUri: string;
@@ -80,14 +88,30 @@ export class TeamMeOAuthProvider implements OAuthServerProvider {
 
   get clientsStore(): OAuthRegisteredClientsStore {
     return {
-      getClient: (clientId: string) => this.store.getOAuthClient(clientId),
+      getClient: async (clientId: string) => {
+        await this.store.sync();
+        return this.store.getOAuthClient(clientId);
+      },
       registerClient: async (client) => {
+        if (client.redirect_uris.length > MAX_REDIRECT_URIS) {
+          throw new InvalidClientMetadataError(`Register at most ${MAX_REDIRECT_URIS} redirect_uris.`);
+        }
         for (const uri of client.redirect_uris) {
           if (!this.isAllowedRedirectUri(uri)) {
             throw new InvalidClientMetadataError(`redirect_uri ${uri} is not allowed on this server.`);
           }
         }
-        return this.store.saveOAuthClient(client as OAuthClientInformationFull);
+        // Keys and software statements are never used here, and can be large.
+        // The token endpoint reads the client secret from the form body only.
+        const { jwks: _jwks, software_statement: _statement, ...kept } = client;
+        const info = {
+          ...kept,
+          token_endpoint_auth_method: kept.token_endpoint_auth_method === 'none' ? 'none' : 'client_secret_post',
+        } as OAuthClientInformationFull;
+        if (JSON.stringify(info).length > MAX_CLIENT_METADATA_LENGTH) {
+          throw new InvalidClientMetadataError('The client metadata is too large.');
+        }
+        return this.store.saveOAuthClient(info, Math.floor(this.now() / 1000));
       },
     };
   }
@@ -110,13 +134,6 @@ export class TeamMeOAuthProvider implements OAuthServerProvider {
     for (const [k, v] of this.codes) if (v.expiresAt < t) this.codes.delete(k);
   }
 
-  private grantedScopes(requested: string[] | undefined): string[] {
-    for (const s of requested ?? []) {
-      if (s !== SCOPE && s !== 'offline_access') throw new InvalidScopeError(`Unknown scope "${s}". This server offers "${SCOPE}".`);
-    }
-    return [SCOPE];
-  }
-
   private checkResource(resource: URL | string | undefined): void {
     if (resource !== undefined && !sameResource(String(resource), this.resourceUrl)) {
       throw new InvalidTargetError(`This server only issues tokens for ${this.resourceUrl}.`);
@@ -125,14 +142,23 @@ export class TeamMeOAuthProvider implements OAuthServerProvider {
 
   async authorize(client: OAuthClientInformationFull, params: AuthorizationParams, res: Response): Promise<void> {
     this.checkResource(params.resource);
-    const scopes = this.grantedScopes(params.scopes);
+    if (params.state !== undefined && params.state.length > MAX_STATE_LENGTH) throw new InvalidRequestError('state is too long.');
+    // The one scope is always granted. Others in the request (claude.ai has
+    // sent "claudeai") are ignored rather than refused (RFC 6749 section 3.3).
+    const scopes = [SCOPE];
     this.prune();
+    // One address can't crowd out everyone else: its oldest waiting sign-in
+    // makes room for its newest.
+    const source = ipKeyGenerator(res.req.ip ?? '', 56);
+    const fromSource = [...this.pending].filter(([, p]) => p.source === source);
+    if (fromSource.length >= MAX_PENDING_PER_SOURCE) this.pending.delete(fromSource[0]![0]);
     if (this.pending.size >= MAX_PENDING) {
       sendMessagePage(res, 429, 'Too many sign-ins in progress', 'Wait a few minutes, then connect again from Claude.');
       return;
     }
     const requestId = randomToken();
     this.pending.set(requestId, {
+      source,
       clientId: client.client_id,
       clientName: client.client_name || 'Unnamed app',
       redirectUri: params.redirectUri,
@@ -225,19 +251,19 @@ export class TeamMeOAuthProvider implements OAuthServerProvider {
     return this.issueTokens(client.client_id, record.scopes, record.resource, undefined);
   }
 
-  async exchangeRefreshToken(client: OAuthClientInformationFull, refreshToken: string, scopes?: string[], resource?: URL): Promise<OAuthTokens> {
-    const hash = sha256(refreshToken);
-    const record = this.store.getRefreshToken(hash);
-    const nowSeconds = Math.floor(this.now() / 1000);
-    if (!record || record.clientId !== client.client_id || record.expiresAt < nowSeconds) {
+  // A refreshed token keeps the scope it was first granted.
+  async exchangeRefreshToken(client: OAuthClientInformationFull, refreshToken: string, _scopes?: string[], resource?: URL): Promise<OAuthTokens> {
+    await this.store.sync();
+    const key = tokenKey(this.config.tokenSigningSecret, refreshToken);
+    const record = this.store.getRefreshToken(key);
+    if (!record || record.clientId !== client.client_id || !refreshTokenUsable(record, Math.floor(this.now() / 1000))) {
       throw new InvalidGrantError('The refresh token is invalid or has expired.');
     }
     this.checkResource(resource);
-    const granted = scopes && scopes.length ? this.grantedScopes(scopes) : record.scopes;
-    return this.issueTokens(client.client_id, granted, record.resource, hash);
+    return this.issueTokens(client.client_id, record.scopes, record.resource, key);
   }
 
-  private async issueTokens(clientId: string, scopes: string[], resource: string, oldRefreshHash: string | undefined): Promise<OAuthTokens> {
+  private async issueTokens(clientId: string, scopes: string[], resource: string, oldRefreshKey: string | undefined): Promise<OAuthTokens> {
     const nowSeconds = Math.floor(this.now() / 1000);
     const accessToken = signAccessToken(
       { typ: 'access', jti: randomToken(12), cid: clientId, scp: scopes, res: resource, iat: nowSeconds, exp: nowSeconds + this.config.accessTokenTtlSeconds },
@@ -246,8 +272,8 @@ export class TeamMeOAuthProvider implements OAuthServerProvider {
     const refreshToken = randomToken();
     try {
       await this.store.rotateRefreshToken(
-        oldRefreshHash,
-        sha256(refreshToken),
+        oldRefreshKey,
+        tokenKey(this.config.tokenSigningSecret, refreshToken),
         { clientId, scopes, resource, expiresAt: nowSeconds + this.config.refreshTokenTtlSeconds },
         nowSeconds,
       );
@@ -267,6 +293,7 @@ export class TeamMeOAuthProvider implements OAuthServerProvider {
   async verifyAccessToken(token: string): Promise<AuthInfo> {
     const payload = verifyAccessTokenSignature(token, this.config.tokenSigningSecret);
     if (!payload) throw new InvalidTokenError('Invalid access token.');
+    await this.store.sync();
     if (payload.exp < Math.floor(this.now() / 1000)) throw new InvalidTokenError('Access token has expired.');
     if (this.store.isAccessTokenRevoked(payload.jti)) throw new InvalidTokenError('Access token was revoked.');
     if (!this.store.getOAuthClient(payload.cid)) throw new InvalidTokenError('The app this token was issued to is no longer registered.');
@@ -274,10 +301,11 @@ export class TeamMeOAuthProvider implements OAuthServerProvider {
   }
 
   async revokeToken(client: OAuthClientInformationFull, request: OAuthTokenRevocationRequest): Promise<void> {
-    const hash = sha256(request.token);
-    const refresh = this.store.getRefreshToken(hash);
+    await this.store.sync();
+    const key = tokenKey(this.config.tokenSigningSecret, request.token);
+    const refresh = this.store.getRefreshToken(key);
     if (refresh) {
-      if (refresh.clientId === client.client_id) await this.store.deleteRefreshToken(hash);
+      if (refresh.clientId === client.client_id) await this.store.deleteRefreshToken(key);
       return;
     }
     const payload = verifyAccessTokenSignature(request.token, this.config.tokenSigningSecret);

@@ -33,10 +33,6 @@ const limit = z.number().int().min(1).max(100).optional().describe('How many to 
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } as const;
 const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false } as const;
 
-function preview(content: string, max = 400): string {
-  return content.length <= max ? content : `${content.slice(0, max)}…`;
-}
-
 // A fresh server per request: the transport runs stateless, and the store is
 // the only shared state.
 export function buildMcpServer(store: Store): McpServer {
@@ -80,7 +76,8 @@ export function buildMcpServer(store: Store): McpServer {
     'get_assignment',
     {
       title: 'Get an assignment',
-      description: 'Get one assignment with its full request, its deliverables and any approvals it raised.',
+      description:
+        'Get one assignment with its full request, a preview of each of its deliverables and any approvals it raised. Use get_deliverable for the full text of a deliverable.',
       inputSchema: { assignment_id: z.string().min(1).max(64) },
       annotations: READ_ONLY,
     },
@@ -172,8 +169,7 @@ export function buildMcpServer(store: Store): McpServer {
     async ({ workspace_id, assignment_id, limit }) =>
       run(() =>
         store
-          .listDeliverables({ ...(workspace_id ? { workspaceId: workspace_id } : {}), ...(assignment_id ? { assignmentId: assignment_id } : {}), ...(limit ? { limit } : {}) })
-          .map(({ content, draft, review, ...rest }) => ({ ...rest, preview: preview(content), hasDraft: Boolean(draft), hasReview: Boolean(review) })),
+          .listDeliverables({ ...(workspace_id ? { workspaceId: workspace_id } : {}), ...(assignment_id ? { assignmentId: assignment_id } : {}), ...(limit ? { limit } : {}) }),
       ),
   );
 
@@ -186,8 +182,8 @@ export function buildMcpServer(store: Store): McpServer {
       annotations: READ_ONLY,
     },
     async ({ deliverable_id }) =>
-      run(() => {
-        const d = store.getDeliverable(deliverable_id);
+      run(async () => {
+        const d = await store.getDeliverable(deliverable_id);
         if (!d) throw new NotFoundError(`No deliverable with id "${deliverable_id}".`);
         return d;
       }),
