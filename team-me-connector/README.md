@@ -76,7 +76,7 @@ All state is in the data file and the `deliverables` folder next to it, so run e
 
 ## Deploy on Azure Container Apps
 
-The Mie-Tech repo already deploys Chatwoot to Azure Container Apps (resource group `TeamMe-WestUS`, registry `azcrfinal27341`). These steps add the connector next to it. Run them once with the Azure CLI, replacing `<environment>` with the Container Apps environment name (`az containerapp env list -g TeamMe-WestUS -o table`).
+The connector runs at `https://mcp.mie.ngo` in its own resource group `TeamMe-WestUS` (West US), with registry `teammecr2026`, Container Apps environment `team-me-env` and storage account `teammedata2026`. Deleting the resource group removes all of it. These steps set it up from nothing with the Azure CLI; if `az login` finds no subscriptions because the directory requires multi-factor sign-in, run `az login --tenant <tenant id>`.
 
 1. Make the three secrets and keep them somewhere safe:
 
@@ -89,29 +89,32 @@ The Mie-Tech repo already deploys Chatwoot to Azure Container Apps (resource gro
 
    The last three lines print `OWNER_PASSPHRASE_HASH`, `TOKEN_SIGNING_SECRET` and `COMMAND_CENTER_API_KEY`, in that order. Run the next steps from the same `team-me-connector` folder.
 
-2. Build the image in the registry:
+2. Create the resource group, registry and environment, then build the image in the registry (the environment also creates a small Log Analytics workspace):
 
    ```sh
-   az acr build --registry azcrfinal27341 --image team-me-connector:0.1.0 .
+   az group create -n TeamMe-WestUS -l westus
+   az acr create -g TeamMe-WestUS -n teammecr2026 -l westus --sku Basic --admin-enabled true
+   az containerapp env create -g TeamMe-WestUS -n team-me-env -l westus
+   az acr build --registry teammecr2026 --image team-me-connector:0.1.0 .
    ```
 
-3. Create a file share for the data file and attach it to the environment. Replace `<account>` with a new lowercase storage account name, e.g. `teammedata2026`:
+3. Create a file share for the data file and attach it to the environment:
 
    ```sh
-   az storage account create -g TeamMe-WestUS -n <account> --sku Standard_LRS
-   az storage share-rm create -g TeamMe-WestUS --storage-account <account> -n team-me
-   az containerapp env storage set -g TeamMe-WestUS -n <environment> --storage-name team-me \
-     --azure-file-account-name <account> \
-     --azure-file-account-key "$(az storage account keys list -g TeamMe-WestUS -n <account> --query '[0].value' -o tsv)" \
+   az storage account create -g TeamMe-WestUS -n teammedata2026 -l westus --sku Standard_LRS --min-tls-version TLS1_2
+   az storage share-rm create -g TeamMe-WestUS --storage-account teammedata2026 -n team-me
+   az containerapp env storage set -g TeamMe-WestUS -n team-me-env --storage-name team-me \
+     --azure-file-account-name teammedata2026 \
+     --azure-file-account-key "$(az storage account keys list -g TeamMe-WestUS -n teammedata2026 --query '[0].value' -o tsv)" \
      --azure-file-share-name team-me --access-mode ReadWrite
    ```
 
-4. Create the app with one replica:
+4. Create the app with one small replica:
 
    ```sh
-   az containerapp create -g TeamMe-WestUS -n team-me-connector --environment <environment> \
-     --image azcrfinal27341.azurecr.io/team-me-connector:0.1.0 --registry-server azcrfinal27341.azurecr.io \
-     --ingress external --target-port 8080 --min-replicas 1 --max-replicas 1 \
+   az containerapp create -g TeamMe-WestUS -n team-me-connector --environment team-me-env \
+     --image teammecr2026.azurecr.io/team-me-connector:0.1.0 --registry-server teammecr2026.azurecr.io \
+     --ingress external --target-port 8080 --min-replicas 1 --max-replicas 1 --cpu 0.25 --memory 0.5Gi \
      --secrets owner-hash='<OWNER_PASSPHRASE_HASH>' signing-secret='<TOKEN_SIGNING_SECRET>' cc-key='<COMMAND_CENTER_API_KEY>' \
      --env-vars PUBLIC_BASE_URL=https://mcp.mie.ngo DATA_FILE=/data/team-me.json \
        OWNER_PASSPHRASE_HASH=secretref:owner-hash TOKEN_SIGNING_SECRET=secretref:signing-secret COMMAND_CENTER_API_KEY=secretref:cc-key
@@ -139,7 +142,7 @@ The Mie-Tech repo already deploys Chatwoot to Azure Container Apps (resource gro
    ```sh
    az containerapp hostname add -g TeamMe-WestUS -n team-me-connector --hostname mcp.mie.ngo
    az containerapp hostname bind -g TeamMe-WestUS -n team-me-connector --hostname mcp.mie.ngo \
-     --environment <environment> --validation-method CNAME
+     --environment team-me-env --validation-method CNAME
    ```
 
    Keep `mcp` set to DNS only. If you later turn on Cloudflare's proxy for it, first limit the app to Cloudflare's addresses, then set `TRUST_PROXY=2`. Without the limit, anyone who calls the app's own `azurecontainerapps.io` address can choose the address that every rate limit sees.
@@ -156,7 +159,7 @@ The Mie-Tech repo already deploys Chatwoot to Azure Container Apps (resource gro
 
 7. Check `https://mcp.mie.ngo/healthz` answers `{"ok":true,...}`, then add the connector in Claude.
 
-To ship a new version, run step 2 with a new tag and `az containerapp update -g TeamMe-WestUS -n team-me-connector --image azcrfinal27341.azurecr.io/team-me-connector:<tag>`. The Chatwoot workflows ignore changes in this folder.
+To ship a new version, run `az acr build --registry teammecr2026 --image team-me-connector:<tag> .` from this folder, then `az containerapp update -g TeamMe-WestUS -n team-me-connector --image teammecr2026.azurecr.io/team-me-connector:<tag>`. The Chatwoot workflows ignore changes in this folder.
 
 ## Develop
 
