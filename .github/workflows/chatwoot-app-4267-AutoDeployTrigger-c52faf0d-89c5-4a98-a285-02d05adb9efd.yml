@@ -2,16 +2,9 @@ name: Trigger auto deployment for chatwoot-app-4267
 
 # When this action will be executed
 on:
-  # Automatically trigger it when detected changes in repo
-  push:
-    branches: 
-      [ main ]
-    paths:
-    - '**'
-    - '.github/workflows/chatwoot-app-4267-AutoDeployTrigger-c52faf0d-89c5-4a98-a285-02d05adb9efd.yml'
-
-  # Allow manual trigger 
-  workflow_dispatch:      
+  # Chatwoot is paused, so this only runs when started by hand from the Actions tab.
+  # To resume auto-deploys, restore the push trigger on main from git history.
+  workflow_dispatch:
 
 jobs:
   build-and-deploy:

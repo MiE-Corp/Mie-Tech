@@ -6,6 +6,7 @@ This repository provides infrastructure files and instructions for deploying an 
 
 - [`chatwoot-deployment/docker-compose.yml`](chatwoot-deployment/docker-compose.yml) &mdash; docker-compose stack for Chatwoot, PostgreSQL, and Redis.
 - [`chatwoot-deployment/.env.example`](chatwoot-deployment/.env.example) &mdash; sample environment variables to copy to `.env` before deploying.
+- [`team-me-connector/`](team-me-connector/README.md) &mdash; Claude connector and shared backend for the Team Me Command Center (`ai.mie.ngo`), deployed separately at `mcp.mie.ngo`.
 
 ## Prerequisites
 
